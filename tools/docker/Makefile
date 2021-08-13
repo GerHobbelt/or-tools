@@ -19,14 +19,22 @@ help:
 	@echo -e "\t${BOLD}archives${RESET}: Build all OR-Tools archives in export."
 	@echo -e "\t${BOLD}test_archives${RESET}: Test each OR-Tools archives for all ${BOLD}<distro>${RESET} and ${BOLD}<lang>${RESET}."
 	@echo
-	@echo -e "\t${BOLD}python${RESET}: Build manylinux2010 and alpine python 'ortools' wheel packages (3.6+)."
-	@echo -e "\t${BOLD}python_<target>${RESET}: Build python 'ortools' wheel packages (3.6+) for a specific target."
-	@echo -e "\t${BOLD}test_python${RESET}: Test manylinux2010 and alpine python 'ortools' wheel packages (3.6+)."
-	@echo -e "\t${BOLD}clean_python${RESET}: Clean manylinux2010 and alpine python 'ortools' wheel packages."
+	@echo -e "\t${BOLD}python${RESET}: Build alpine and manylinux2014 python 'ortools' wheel packages (3.6+)."
+	@echo -e "\t${BOLD}python_<target>_<step>${RESET}: Build python 'ortools' wheel packages (3.6+) for a specific target."
+	@echo -e "\t${BOLD}clean_python_<target>${RESET}: Clean manylinux2014 and alpine python 'ortools' wheel packages."
 	@echo
 	@echo -e "\t${BOLD}<target>${RESET}:"
-	@echo -e "\t\t${BOLD}manylinux${RESET} (latest)"
 	@echo -e "\t\t${BOLD}alpine${RESET} (latest)"
+	@echo -e "\t\t${BOLD}manylinux${RESET} (latest)"
+	@echo -e "\t\t${BOLD}alpine_aarch64${RESET} (latest)"
+	@echo -e "\t\t${BOLD}manylinux_aarch64${RESET} (latest)"
+	@echo
+	@echo -e "\t${BOLD}<step>${RESET}:"
+	@echo -e "\t\t${BOLD}env${RESET}"
+	@echo -e "\t\t${BOLD}devel${RESET}"
+	@echo -e "\t\t${BOLD}third_party${RESET}"
+	@echo -e "\t\t${BOLD}build${RESET}"
+	@echo
 	@echo
 	@echo -e "\t${BOLD}<stage>${RESET}: build <stage> docker images for ALL DISTROS."
 	@echo -e "\t${BOLD}<distro>_<stage>${RESET}: build the <stage> docker image for a specific distro."
@@ -114,69 +122,184 @@ test_delivery: test_archives
 ###############
 ###  PYTHON  ##
 ###############
+# $* stem
+# $< first prerequist
+# $@ target name
+
 export:
 	-mkdir $@
 
 export/python: | export
 	-mkdir $@
 
-export/python/build-manylinux1.sh: build-manylinux1.sh | export/python
+export/python/%/build-manylinux1.sh: build-manylinux1.sh | export/python
+	-mkdir -p export/python/$*
 	cp $< $@
 
-TARGETS = manylinux alpine
-targets = $(addprefix python_, $(TARGETS))
+export/python/%/build-manylinux.sh: build-manylinux.sh | export/python
+	-mkdir -p export/python/$*
+	cp $< $@
+
+# Currently supported distro
+PYTHON_DISTROS = alpine manylinux
+STAGES = env devel third_party build
+define make-python-stage-target
+python_targets_$1 = $(addprefix python_, $(addsuffix _$1, $(PYTHON_DISTROS)))
+.PHONY: $(python_targets_$1)
+$$(python_targets_$1): python_%_$1: python_%.Dockerfile | export/python/%/build-manylinux1.sh
+	@docker image rm -f ${IMAGE}:python_$$*_$1 2>/dev/null
+	${DOCKER_BUILD_CMD} \
+		--tag ${IMAGE}:python_$$*_$1 \
+ --build-arg SRC_GIT_BRANCH=$(OR_TOOLS_BRANCH) \
+ --build-arg SRC_GIT_SHA1=$(OR_TOOLS_SHA1) \
+		--target=$1 \
+		-f $$< \
+		export/python/$$*
+
+save_python_targets_$1 = $(addprefix save_python_, $(addsuffix _$1, $(PYTHON_DISTROS)))
+.PHONY: $(save_python_targets_$1)
+$$(save_python_targets_$1): save_python_%_$1: cache/python/%/docker_$1.tar
+cache/python/%/docker_$1.tar: %_$1
+	@rm -f $$@
+	mkdir -p cache/python/$$*
+	docker save ${IMAGE}:python_$$*_$1 -o $$@
+
+sh_python_targets_$1 = $(addprefix sh_python_, $(addsuffix _$1, $(PYTHON_DISTROS)))
+.PHONY: $(sh_python_targets_$1)
+$$(sh_python_targets_$1): sh_python_%_$1: python_%_$1
+	${DOCKER_RUN_CMD} -v `pwd`/export:/export -it --name ortools_python_$$*_$1 ${IMAGE}:python_$$*_$1
+
+clean_python_targets_$1 = $(addprefix clean_python_, $(addsuffix _$1, $(PYTHON_DISTROS)))
+.PHONY: $(clean_python_targets_$1)
+$$(clean_python_targets_$1): clean_python_%_$1:
+	docker image rm -f ${IMAGE}:python_$$*_$1 2>/dev/null
+	rm -f cache/puython_$$*/docker_$1.tar
+endef
+
+$(foreach stage,$(STAGES),$(eval $(call make-python-stage-target,$(stage))))
+
+python_targets_install = $(addprefix python_, $(addsuffix _install, $(PYTHON_DISTROS)))
+.PHONY: $(python_targets_install)
+$(python_targets_install): python_%_install: python_%_build
+	${DOCKER_RUN_CMD} \
+    -v `pwd`/export:/export
+		-it ${IMAGE}:python_$*_build \
+		/bin/sh -c "cp *.whl /export/python"
+
+
+PYTHON_ARM_DISTROS = alpine_aarch64 manylinux_aarch64
+define make-python-arm-stage-target
+python_targets_$1 = $(addprefix python_, $(addsuffix _$1, $(PYTHON_ARM_DISTROS)))
+.PHONY: $(python_targets_$1)
+$$(python_targets_$1): python_%_$1: python_%.Dockerfile | export/python/%/build-manylinux.sh
+	@docker image rm -f ${IMAGE}:python_$$*_$1 2>/dev/null
+	${DOCKER_BUILD_CMD} \
+		--tag ${IMAGE}:python_$$*_$1 \
+ --build-arg SRC_GIT_BRANCH=$(OR_TOOLS_BRANCH) \
+ --build-arg SRC_GIT_SHA1=$(OR_TOOLS_SHA1) \
+		--target=$1 \
+		-f $$< \
+		export/python/$$*
+
+save_python_targets_$1 = $(addprefix save_python_, $(addsuffix _$1, $(PYTHON_ARM_DISTROS)))
+.PHONY: $(save_python_targets_$1)
+$$(save_python_targets_$1): save_python_%_$1: cache/python/%/docker_$1.tar
+cache/python/%/docker_$1.tar: %_$1
+	@rm -f $$@
+	mkdir -p cache/python/$$*
+	docker save ${IMAGE}:python_$$*_$1 -o $$@
+
+sh_python_targets_$1 = $(addprefix sh_python_, $(addsuffix _$1, $(PYTHON_ARM_DISTROS)))
+.PHONY: $(sh_python_targets_$1)
+$$(sh_python_targets_$1): sh_python_%_$1: python_%_$1
+	${DOCKER_RUN_CMD} -v `pwd`/export:/export -it --name ortools_python_$$*_$1 ${IMAGE}:python_$$*_$1
+
+clean_python_targets_$1 = $(addprefix clean_python_, $(addsuffix _$1, $(PYTHON_ARM_DISTROS)))
+.PHONY: $(clean_python_targets_$1)
+$$(clean_python_targets_$1): clean_python_%_$1:
+	docker image rm -f ${IMAGE}:python_$$*_$1 2>/dev/null
+	rm -f cache/puython_$$*/docker_$1.tar
+endef
+
+$(foreach stage,$(STAGES),$(eval $(call make-python-arm-stage-target,$(stage))))
+
+python_arm_targets_install = $(addprefix python_, $(addsuffix _install, $(PYTHON_ARM_DISTROS)))
+.PHONY: $(python_arm_targets_install)
+$(python_arm_targets_install): python_%_install: python_%_build
+	${DOCKER_RUN_CMD} \
+    -v `pwd`/export:/export
+		-it ${IMAGE}:python_$*_build \
+		/bin/sh -c "cp *.whl /export/python"
+
 
 .PHONY: python
-python: $(targets)
+python: $(addprefix python_, $(addsuffix _install, $(PYTHON_DISTROS))) $(addprefix python_, $(addsuffix _install, $(PYTHON_ARM_DISTROS)))
 
-.PHONY: python_manylinux
-python_manylinux: ortools_python_manylinux
-	$(DOCKER_RUN_CMD) \
- -v `pwd`/export:/export \
- -it $< \
- /bin/bash -c \
- "/root/build/build-manylinux1.sh /root/src /root/build /export/python"
-
-.PHONY: ortools_python_manylinux
-ortools_python_manylinux: manylinux.Dockerfile export/python/build-manylinux1.sh ../../makefiles
-	#@docker image rm -f $@ 2>/dev/null
-	$(DOCKER_BUILD_CMD) \
- --tag $@ \
- --build-arg SRC_GIT_BRANCH=$(OR_TOOLS_BRANCH) \
- --build-arg SRC_GIT_SHA1=$(OR_TOOLS_SHA1) \
- --target=build \
- -f $< \
- export/python
-
-.PHONY: python_alpine
-python_alpine: ortools_python_alpine
-	$(DOCKER_RUN_CMD) \
- -v `pwd`/export:/export \
- -it $< \
- /bin/sh -c \
- "cp *.whl /export/python"
-
-.PHONY: ortools_python_alpine
-ortools_python_alpine: alpine.Dockerfile ../../makefiles | export/python
-	#@docker image rm -f $@ 2>/dev/null
-	$(DOCKER_BUILD_CMD) \
- --tag $@ \
- --build-arg SRC_GIT_BRANCH=$(OR_TOOLS_BRANCH) \
- --build-arg SRC_GIT_SHA1=$(OR_TOOLS_SHA1) \
- --target=build \
- -f $< \
- export/python
-
-.PHONY: save_docker_python
-save_docker_python: export/python/manylinux.tar export/python/alpine.tar
-
-export/python/%.tar: ortools_python_%
-	-rm -f $@
-	docker save $< -o $@
-
-targets = $(addprefix bash_python_, $(TARGETS))
-$(targets): bash_python_%: ortools_python_%
-	$(DOCKER_RUN_CMD) -v `pwd`/export:/export -it --name ortools_python $<
+#.PHONY: ortools_python_manylinux_x86_64
+#ortools_python_manylinux_x86_64 : manylinux_x86_64.Dockerfile export/python/build-manylinux1.sh ../../makefiles
+#	$(DOCKER_BUILD_CMD) \
+# --tag $@ \
+# --build-arg SRC_GIT_BRANCH=$(OR_TOOLS_BRANCH) \
+# --build-arg SRC_GIT_SHA1=$(OR_TOOLS_SHA1) \
+# --target=build \
+# -f $< \
+# export/python
+#
+#.PHONY: python_manylinux_x86_64
+#python_manylinux_x86_64: ortools_python_manylinux_x86_64
+#	$(DOCKER_RUN_CMD) \
+# -v `pwd`/export:/export \
+# -it $< \
+# /bin/bash -c \
+# "/root/build/build-manylinux1.sh /root/src /root/build /export/python"
+#
+#.PHONY: ortools_python_manylinux_aarch64
+#ortools_python_manylinux_aarch64 : manylinux_aarch64.Dockerfile export/python/build-manylinux1.sh ../../makefiles
+#	$(DOCKER_BUILD_CMD) \
+# --tag $@ \
+# --build-arg SRC_GIT_BRANCH=$(OR_TOOLS_BRANCH) \
+# --build-arg SRC_GIT_SHA1=$(OR_TOOLS_SHA1) \
+# --target=build \
+# -f $< \
+# export/python
+#
+#.PHONY: python_manylinux_aarch64
+#python_manylinux_aarch64: ortools_python_manylinux_aarch64
+#	$(DOCKER_RUN_CMD) \
+# -v `pwd`/export:/export \
+# -it $< \
+# /bin/bash -c \
+# "/root/build/build-manylinux1.sh /root/src /root/build /export/python"
+#
+#.PHONY: ortools_python_alpine
+#ortools_python_alpine: alpine.Dockerfile ../../makefiles | export/python
+#	#@docker image rm -f $@ 2>/dev/null
+#	$(DOCKER_BUILD_CMD) \
+# --tag $@ \
+# --build-arg SRC_GIT_BRANCH=$(OR_TOOLS_BRANCH) \
+# --build-arg SRC_GIT_SHA1=$(OR_TOOLS_SHA1) \
+# --target=build \
+# -f $< \
+# export/python
+#
+#.PHONY: python_alpine
+#python_alpine: ortools_python_alpine
+#	$(DOCKER_RUN_CMD) \
+# -v `pwd`/export:/export \
+# -it $< \
+# /bin/sh -c \
+# "cp *.whl /export/python"
+#
+#.PHONY: save_docker_python
+#save_docker_python: export/python/manylinux_x86_64.tar export/python/manylinux_aarch64.tar export/python/alpine.tar
+#
+#export/python/%.tar: ortools_python_%
+#	-rm -f $@
+#	docker save $< -o $@
+#
+#targets = $(addprefix bash_python_, $(TARGETS))
+#$(targets): bash_python_%: ortools_python_%
+#	$(DOCKER_RUN_CMD) -v `pwd`/export:/export -it --name ortools_python $<
 
 #################
 ###  ARCHIVES  ##
@@ -327,10 +450,11 @@ $(targets): clean_%: $(addprefix clean_%_, $(STAGES))
 
 .PHONY: clean_python
 clean_python:
-	-docker image rm -f ortools_python_manylinux 2>/dev/null
+	-docker image rm -f ortools_python_manylinux_x86_64 2>/dev/null
+	-docker image rm -f ortools_python_manylinux_aarch64 2>/dev/null
 	-docker image rm -f ortools_python_alpine 2>/dev/null
 	-rm -f export/python/ortools-*.whl
-	-rm -f export/python/manylinux.tar
+	-rm -f export/python/manylinux*.tar
 	-rm -f export/python/alpine.tar
 	-rm -f export/python/build-manylinux*.sh
 	-rmdir export/python

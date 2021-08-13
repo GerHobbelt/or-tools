@@ -1,4 +1,4 @@
-FROM quay.io/pypa/manylinux2010_x86_64:latest AS env
+FROM quay.io/pypa/manylinux2014_x86_64:latest AS env
 
 RUN yum -y update \
 && yum -y install \
